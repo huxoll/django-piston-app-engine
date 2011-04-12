@@ -34,6 +34,7 @@ class Resource(object):
             raise AttributeError, "Handler not callable."
 
         self.handler = handler()
+        self.csrf_exempt = getattr(self.handler, 'csrf_exempt', True)
 
         if not authentication:
             self.authentication = (NoAuthentication(),)
@@ -66,7 +67,7 @@ class Resource(object):
 
     def form_validation_response(self, e):
         """
-        Method to return form validation error information. 
+        Method to return form validation error information.
         You will probably want to override this in your own
         `Resource` subclass.
         """
@@ -145,8 +146,7 @@ class Resource(object):
         if not rm in handler.allowed_methods:
             return HttpResponseNotAllowed(handler.allowed_methods)
 
-        meth = getattr(handler, self.callmap.get(rm), None)
-
+        meth = getattr(handler, self.callmap.get(rm, ''), None)
         if not meth:
             raise Http404
 
@@ -163,27 +163,31 @@ class Resource(object):
         try:
             result = meth(request, *args, **kwargs)
         except Exception, e:
-            result = self.error_handler(e, request, meth)
+            result = self.error_handler(e, request, meth, em_format)
 
+        try:
+            emitter, ct = Emitter.get(em_format)
+            fields = handler.fields
 
-        emitter, ct = Emitter.get(em_format)
-        fields = handler.fields
-        if hasattr(handler, 'list_fields') and (
-                isinstance(result, list) or isinstance(result, QuerySet)):
-            fields = handler.list_fields
+            if hasattr(handler, 'list_fields') and isinstance(result, (list, tuple, QuerySet)):
+                fields = handler.list_fields
+        except ValueError:
+            result = rc.BAD_REQUEST
+            result.content = "Invalid output format specified '%s'." % em_format
+            return result
 
         status_code = 200
 
         # If we're looking at a response object which contains non-string
-        # content, then assume we should use the emitter to format that 
+        # content, then assume we should use the emitter to format that
         # content
         if isinstance(result, HttpResponse) and not result._is_string:
             status_code = result.status_code
             # Note: We can't use result.content here because that method attempts
-            # to convert the content into a string which we don't want. 
+            # to convert the content into a string which we don't want.
             # when _is_string is False _container is the raw data
             result = result._container
-            
+
         srl = emitter(result, typemapper, handler, fields, anonymous)
 
         try:
@@ -241,9 +245,9 @@ class Resource(object):
         message.send(fail_silently=True)
 
 
-    def error_handler(self, e, request, meth):
+    def error_handler(self, e, request, meth, em_format):
         """
-        Override this method to add handling of errors customized for your 
+        Override this method to add handling of errors customized for your
         needs
         """
         if isinstance(e, FormValidationError):
@@ -271,8 +275,8 @@ class Resource(object):
 
         elif isinstance(e, HttpStatusCode):
             return e.response
- 
-        else: 
+
+        else:
             """
             On errors (like code errors), we'd like to be able to
             give crash reports to both admins and also the calling
